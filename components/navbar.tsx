@@ -23,7 +23,10 @@ export async function Navbar() {
         <Link href="/" className="text-sm font-semibold tracking-wide">
           Python Quest
         </Link>
-        <nav className="flex items-center gap-2">
+        <nav className="flex items-center gap-1">
+          <Button variant="ghost" asChild>
+            <Link href="/dashboard">Dashboard</Link>
+          </Button>
           <Button variant="ghost" asChild>
             <Link href="/lessons">Lessons</Link>
           </Button>
