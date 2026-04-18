@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { rateLimit } = require("express-rate-limit");
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -13,35 +14,15 @@ const MAX_CODE_BYTES = 20_000;
 const OUTPUT_LIMIT = 8_000;
 const TIMEOUT_MS = 3_000;
 
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 20;
-const rateLimitStore = new Map();
-
-function getClientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.trim()) {
-    return forwarded.split(",")[0].trim();
-  }
-  return req.ip || req.socket.remoteAddress || "unknown";
-}
-
-function isRateLimited(req) {
-  const now = Date.now();
-  const key = getClientIp(req);
-  const entry = rateLimitStore.get(key);
-
-  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    rateLimitStore.set(key, { count: 1, windowStart: now });
-    return false;
-  }
-
-  entry.count += 1;
-  rateLimitStore.set(key, entry);
-
-  return entry.count > RATE_LIMIT_MAX_REQUESTS;
-}
-
 app.use(express.json({ limit: "64kb" }));
+
+const runLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many requests" },
+});
 
 function truncate(value = "") {
   if (value.length <= OUTPUT_LIMIT) return value;
@@ -53,10 +34,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/run", async (req, res) => {
-  if (isRateLimited(req)) {
-    return res.status(429).json({ error: "too many requests" });
-  }
+app.post("/run", runLimiter, async (req, res) => {
   const code = typeof req.body?.code === "string" ? req.body.code : "";
 
   if (!code.trim()) {
