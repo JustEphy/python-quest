@@ -88,7 +88,7 @@ app.post("/run", runLimiter, async (req, res) => {
       stdout = error.stdout ?? "";
       stderr = error.stderr ?? error.message;
       exitCode = Number.isInteger(error.code) ? error.code : 1;
-      timedOut = Boolean(error.killed || error.signal === "SIGTERM" || error.signal === "SIGKILL");
+      timedOut = Boolean(error.killed || error.signal === "SIGTERM");
     }
 
     return res.json({
