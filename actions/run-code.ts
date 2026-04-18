@@ -29,7 +29,9 @@ export async function runCode(
     };
   }
 
-  const response = await fetch(`${process.env.PYTHON_RUNNER_URL}/run`, {
+  const runnerUrl = process.env.PYTHON_RUNNER_URL ?? "http://localhost:4000";
+
+  const response = await fetch(`${runnerUrl}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code }),

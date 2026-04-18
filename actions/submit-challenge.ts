@@ -65,7 +65,18 @@ export async function submitChallenge(
     };
   }
 
-  const response = await fetch(`${process.env.PYTHON_RUNNER_URL}/run`, {
+  const runnerUrl = process.env.PYTHON_RUNNER_URL ?? "http://localhost:4000";
+
+  const { data: existingPass } = await supabase
+    .from("submissions")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("challenge_id", challenge.id)
+    .eq("passed", true)
+    .limit(1)
+    .maybeSingle();
+
+  const response = await fetch(`${runnerUrl}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -114,15 +125,6 @@ ${challenge.test_code}`,
     };
   }
 
-  const { data: existingPass } = await supabase
-    .from("submissions")
-    .select("id")
-    .eq("user_id", user.id)
-    .eq("challenge_id", challenge.id)
-    .eq("passed", true)
-    .neq("code", code)
-    .limit(1)
-    .maybeSingle();
 
   await supabase.from("user_lesson_progress").upsert({
     user_id: user.id,

@@ -2,17 +2,29 @@
 
 ## Isolation Model
 - Next.js never executes user code directly.
-- A separate runner service handles execution requests.
-- Runner launches short-lived Python Docker containers.
+- Web server actions call a separate runner service over HTTP.
+- Runner launches short-lived Python containers for each request.
 
-## Required Controls
+## Container Controls
+Execution uses `docker run` with:
 - `--network=none`
-- Read-only image runtime with ephemeral temp file mount
-- CPU/memory/pids constraints
-- Hard timeout termination (~3s)
-- Stdout/stderr truncation
+- `--memory=128m`
+- `--cpus=0.5`
+- `--pids-limit=64`
+- `--read-only`
+- `--tmpfs /tmp:rw,noexec,nosuid,size=64k`
+- bind-mounted ephemeral temp directory (read-only)
+
+## Process Controls
+- Max code payload size limit
+- Hard timeout (~3s)
+- Non-persistent temp file workspace
+- Truncated stdout/stderr to fixed max length
+
+## App Boundaries
+- No direct `exec` of user code in Next.js runtime
+- All code execution flows through `actions/run-code.ts` / `actions/submit-challenge.ts` to runner service
 
 ## Operational Notes
-- Runner validates input size and rejects oversized submissions.
-- Only Python source text is accepted.
-- Service returns structured stdout/stderr/exit status and timeout flag.
+- Runner requires Docker daemon access.
+- For local dev, ensure Docker is running before using playground run/submit features.
