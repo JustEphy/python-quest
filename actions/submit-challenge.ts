@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { derivePetState } from "@/lib/gamification";
 import { createClient } from "@/lib/supabase/server";
 import type { RunnerActionState } from "@/actions/run-code";
@@ -10,6 +11,8 @@ export const INITIAL_SUBMIT_STATE: RunnerActionState = {
   stderr: "",
 };
 
+const RUNNER_TIMEOUT_MS = 10_000;
+
 function utcDateOnly(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
@@ -18,6 +21,18 @@ function previousUtcDate(dateStr: string) {
   const date = new Date(`${dateStr}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() - 1);
   return utcDateOnly(date);
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function removeSentinelLine(output: string, sentinel: string) {
+  return output
+    .split("\n")
+    .filter((line) => line.trim() !== sentinel)
+    .join("\n")
+    .replace(/\n+$/, "");
 }
 
 export async function submitChallenge(
@@ -39,9 +54,10 @@ export async function submitChallenge(
   const supabase = await createClient();
   const {
     data: { user },
+    error: userError,
   } = await supabase.auth.getUser();
 
-  if (!user) {
+  if (userError || !user) {
     return {
       ok: false,
       stdout: "",
@@ -50,13 +66,13 @@ export async function submitChallenge(
     };
   }
 
-  const { data: challenge } = await supabase
+  const { data: challenge, error: challengeError } = await supabase
     .from("challenges")
     .select("id, lesson_id, test_code, xp_reward")
     .eq("id", challengeId)
     .maybeSingle();
 
-  if (!challenge) {
+  if (challengeError || !challenge) {
     return {
       ok: false,
       stdout: "",
@@ -66,8 +82,18 @@ export async function submitChallenge(
   }
 
   const runnerUrl = process.env.PYTHON_RUNNER_URL ?? "http://localhost:4000";
+  const runnerToken = process.env.RUNNER_SHARED_TOKEN;
 
-  const { data: existingPass } = await supabase
+  if (!runnerToken) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "",
+      message: "Runner token is not configured.",
+    };
+  }
+
+  const { data: existingPass, error: existingPassError } = await supabase
     .from("submissions")
     .select("id")
     .eq("user_id", user.id)
@@ -76,49 +102,107 @@ export async function submitChallenge(
     .limit(1)
     .maybeSingle();
 
-  const response = await fetch(`${runnerUrl}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code: `${code}
+  if (existingPassError) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "",
+      message: "Could not load submission history.",
+    };
+  }
 
-${challenge.test_code}`,
-    }),
-    cache: "no-store",
-  });
+  const passSentinel = `PYQ_PASS_${randomUUID()}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), RUNNER_TIMEOUT_MS);
 
-  if (!response.ok) {
+  let result: {
+    stdout?: string;
+    stderr?: string;
+    timedOut?: boolean;
+    exitCode?: number;
+  };
+
+  try {
+    const response = await fetch(`${runnerUrl}/run`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Runner-Token": runnerToken,
+      },
+      body: JSON.stringify({
+        code: `${code}
+
+${challenge.test_code}
+
+print("${passSentinel}")`,
+      }),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        stdout: "",
+        stderr: "",
+        message: response.status === 401 ? "Runner authentication failed." : "Runner service unavailable.",
+      };
+    }
+
+    result = (await response.json()) as {
+      stdout?: string;
+      stderr?: string;
+      timedOut?: boolean;
+      exitCode?: number;
+    };
+  } catch (error) {
+    if (isAbortError(error)) {
+      return {
+        ok: false,
+        stdout: "",
+        stderr: "",
+        message: "Runner request timed out. Please try again.",
+      };
+    }
+
     return {
       ok: false,
       stdout: "",
       stderr: "",
       message: "Runner service unavailable.",
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 
-  const result = (await response.json()) as {
-    stdout?: string;
-    stderr?: string;
-    timedOut?: boolean;
-    exitCode?: number;
-    passed?: boolean;
-  };
+  const rawStdout = result.stdout ?? "";
+  const sentinelSeen = rawStdout.split(/\r?\n/).some((line) => line.trim() === passSentinel);
+  const submissionStdout = removeSentinelLine(rawStdout, passSentinel);
+  const passed = Boolean(sentinelSeen && (result.exitCode ?? 1) === 0 && !result.timedOut);
 
-  const passed = Boolean(result.passed || ((result.exitCode ?? 1) === 0 && !result.timedOut));
-
-  await supabase.from("submissions").insert({
+  const { error: submissionError } = await supabase.from("submissions").insert({
     user_id: user.id,
     challenge_id: challenge.id,
     code,
     passed,
-    stdout: result.stdout ?? "",
+    stdout: submissionStdout,
     stderr: result.stderr ?? "",
   });
+
+  if (submissionError) {
+    return {
+      ok: false,
+      stdout: submissionStdout,
+      stderr: result.stderr ?? "",
+      message: "Could not save submission.",
+      passed: false,
+    };
+  }
 
   if (!passed) {
     return {
       ok: false,
-      stdout: result.stdout ?? "",
+      stdout: submissionStdout,
       stderr: result.stderr ?? "",
       message: result.timedOut ? "Tests timed out." : "Tests failed.",
       passed: false,
@@ -126,27 +210,57 @@ ${challenge.test_code}`,
   }
 
 
-  await supabase.from("user_lesson_progress").upsert({
+  const { error: progressError } = await supabase.from("user_lesson_progress").upsert({
     user_id: user.id,
     lesson_id: challenge.lesson_id,
     completed: true,
     completed_at: new Date().toISOString(),
   });
 
+  if (progressError) {
+    return {
+      ok: false,
+      stdout: submissionStdout,
+      stderr: result.stderr ?? "",
+      message: "Could not update lesson progress.",
+      passed: false,
+    };
+  }
+
   if (!existingPass) {
-    await supabase.from("xp_events").insert({
+    const { error: xpEventError } = await supabase.from("xp_events").insert({
       user_id: user.id,
       source: `challenge:${challenge.id}`,
       amount: challenge.xp_reward,
       metadata: { challengeId: challenge.id },
     });
+
+    if (xpEventError) {
+      return {
+        ok: false,
+        stdout: submissionStdout,
+        stderr: result.stderr ?? "",
+        message: "Could not award XP.",
+        passed: false,
+      };
+    }
   }
 
-  const { data: streak } = await supabase
+  const { data: streak, error: streakError } = await supabase
     .from("streaks")
     .select("current_streak, longest_streak, last_active_date")
     .eq("user_id", user.id)
     .maybeSingle();
+
+  if (streakError) {
+    return {
+      ok: false,
+      stdout: submissionStdout,
+      stderr: result.stderr ?? "",
+      message: "Could not load streak data.",
+      passed: false,
+    };
+  }
 
   const today = utcDateOnly();
   const yesterday = previousUtcDate(today);
@@ -164,7 +278,7 @@ ${challenge.test_code}`,
 
   longestStreak = Math.max(longestStreak, currentStreak);
 
-  await supabase.from("streaks").upsert({
+  const { error: streakUpsertError } = await supabase.from("streaks").upsert({
     user_id: user.id,
     current_streak: currentStreak,
     longest_streak: longestStreak,
@@ -172,11 +286,32 @@ ${challenge.test_code}`,
     updated_at: new Date().toISOString(),
   });
 
-  const { data: xpRows } = await supabase.from("xp_events").select("amount").eq("user_id", user.id);
+  if (streakUpsertError) {
+    return {
+      ok: false,
+      stdout: submissionStdout,
+      stderr: result.stderr ?? "",
+      message: "Could not update streak.",
+      passed: false,
+    };
+  }
+
+  const { data: xpRows, error: xpRowsError } = await supabase.from("xp_events").select("amount").eq("user_id", user.id);
+
+  if (xpRowsError) {
+    return {
+      ok: false,
+      stdout: submissionStdout,
+      stderr: result.stderr ?? "",
+      message: "Could not load XP.",
+      passed: false,
+    };
+  }
+
   const totalXp = (xpRows ?? []).reduce((sum, row) => sum + row.amount, 0);
   const pet = derivePetState(totalXp, currentStreak);
 
-  await supabase.from("pets").upsert({
+  const { error: petError } = await supabase.from("pets").upsert({
     user_id: user.id,
     species: pet.species,
     evolution_stage: pet.evolutionStage,
@@ -184,9 +319,19 @@ ${challenge.test_code}`,
     updated_at: new Date().toISOString(),
   });
 
+  if (petError) {
+    return {
+      ok: false,
+      stdout: submissionStdout,
+      stderr: result.stderr ?? "",
+      message: "Could not update pet state.",
+      passed: false,
+    };
+  }
+
   return {
     ok: true,
-    stdout: result.stdout ?? "",
+    stdout: submissionStdout,
     stderr: result.stderr ?? "",
     message: `Challenge passed! +${existingPass ? 0 : challenge.xp_reward} XP`,
     passed: true,

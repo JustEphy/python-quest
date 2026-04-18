@@ -2,6 +2,7 @@ const express = require("express");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { rateLimit } = require("express-rate-limit");
@@ -13,6 +14,7 @@ const PORT = process.env.PORT || 4000;
 const MAX_CODE_BYTES = 20_000;
 const OUTPUT_LIMIT = 8_000;
 const TIMEOUT_MS = 3_000;
+const RUNNER_SHARED_TOKEN = process.env.RUNNER_SHARED_TOKEN;
 
 app.use(express.json({ limit: "64kb" }));
 
@@ -30,11 +32,31 @@ function truncate(value = "") {
 ...<truncated>`;
 }
 
+async function forceRemoveContainer(containerName) {
+  try {
+    await execFileAsync("docker", ["rm", "-f", containerName], {
+      timeout: 2_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch {
+    // ignore cleanup failures
+  }
+}
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
 app.post("/run", runLimiter, async (req, res) => {
+  if (!RUNNER_SHARED_TOKEN) {
+    return res.status(500).json({ error: "runner token is not configured" });
+  }
+
+  const requestToken = req.get("x-runner-token");
+  if (requestToken !== RUNNER_SHARED_TOKEN) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
   const code = typeof req.body?.code === "string" ? req.body.code : "";
 
   if (!code.trim()) {
@@ -50,14 +72,23 @@ app.post("/run", runLimiter, async (req, res) => {
 
   try {
     await fs.writeFile(filePath, code, "utf8");
+    const containerName = `pyq-run-${randomUUID()}`;
 
     const args = [
       "run",
       "--rm",
+      "--name",
+      containerName,
       "--network=none",
       "--memory=128m",
       "--cpus=0.5",
       "--pids-limit=64",
+      "--cap-drop=ALL",
+      "--security-opt",
+      "no-new-privileges",
+      "--ipc=none",
+      "--user",
+      "65534:65534",
       "--read-only",
       "--tmpfs",
       "/tmp:rw,noexec,nosuid,size=64k",
@@ -86,9 +117,12 @@ app.post("/run", runLimiter, async (req, res) => {
       stderr = result.stderr ?? "";
     } catch (error) {
       stdout = error.stdout ?? "";
-      stderr = error.stderr ?? error.message;
+      stderr = error.stderr ?? error.message ?? "runner error";
       exitCode = Number.isInteger(error.code) ? error.code : 1;
       timedOut = Boolean(error.killed || error.signal === "SIGTERM");
+      if (timedOut) {
+        await forceRemoveContainer(containerName);
+      }
     }
 
     return res.json({

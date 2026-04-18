@@ -37,6 +37,7 @@ Set values:
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY` (reserved for future admin operations)
 - `PYTHON_RUNNER_URL` (default: `http://localhost:4000`)
+- `RUNNER_SHARED_TOKEN` (required; must match in web + runner environments)
 
 ## 3) Apply database schema + seed
 Run these SQL files in order inside Supabase SQL editor (or via Supabase CLI):
@@ -64,6 +65,7 @@ Web app: http://localhost:3000
 
 ## 5) Run the Python runner service
 ```bash
+export RUNNER_SHARED_TOKEN=your-shared-runner-token
 cd runner
 npm install
 npm run dev
