@@ -38,8 +38,8 @@ async function forceRemoveContainer(containerName) {
       timeout: 2_000,
       maxBuffer: 1024 * 1024,
     });
-  } catch {
-    // ignore cleanup failures
+  } catch (cleanupError) {
+    console.warn("Runner cleanup failed:", String(cleanupError?.message ?? cleanupError));
   }
 }
 
@@ -116,8 +116,13 @@ app.post("/run", runLimiter, async (req, res) => {
       stdout = result.stdout ?? "";
       stderr = result.stderr ?? "";
     } catch (error) {
+      console.error("Runner execution error:", String(error?.message ?? error));
+      const fallbackError =
+        error?.name != null
+          ? `Code execution failed (${String(error.name)}).`
+          : "Code execution failed with an unknown runner error.";
       stdout = error.stdout ?? "";
-      stderr = error.stderr ?? error.message ?? "runner error";
+      stderr = error.stderr ?? error?.message ?? fallbackError;
       exitCode = Number.isInteger(error.code) ? error.code : 1;
       timedOut = Boolean(error.killed || error.signal === "SIGTERM");
       if (timedOut) {

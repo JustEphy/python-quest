@@ -12,7 +12,7 @@ services:
       - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - PYTHON_RUNNER_URL=${PYTHON_RUNNER_URL:-http://runner:4000}
-      - RUNNER_SHARED_TOKEN=${RUNNER_SHARED_TOKEN:-local-dev-runner-token}
+      - RUNNER_SHARED_TOKEN=${RUNNER_SHARED_TOKEN}
     volumes:
       - ./:/app
 
@@ -23,6 +23,6 @@ services:
     expose:
       - "4000"
     environment:
-      - RUNNER_SHARED_TOKEN=${RUNNER_SHARED_TOKEN:-local-dev-runner-token}
+      - RUNNER_SHARED_TOKEN=${RUNNER_SHARED_TOKEN}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

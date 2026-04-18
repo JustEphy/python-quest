@@ -1,6 +1,5 @@
 "use server";
 
-import { randomUUID } from "node:crypto";
 import { derivePetState } from "@/lib/gamification";
 import { createClient } from "@/lib/supabase/server";
 import type { RunnerActionState } from "@/actions/run-code";
@@ -27,12 +26,8 @@ function isAbortError(error: unknown) {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function removeSentinelLine(output: string, sentinel: string) {
-  return output
-    .split("\n")
-    .filter((line) => line.trim() !== sentinel)
-    .join("\n")
-    .replace(/\n+$/, "");
+function encodeBase64(value: string) {
+  return Buffer.from(value, "utf8").toString("base64");
 }
 
 export async function submitChallenge(
@@ -111,7 +106,53 @@ export async function submitChallenge(
     };
   }
 
-  const passSentinel = `PYQ_PASS_${randomUUID()}`;
+  const encodedUserCode = encodeBase64(code);
+  const encodedTestCode = encodeBase64(challenge.test_code);
+  const encodedUserCodeLiteral = JSON.stringify(encodedUserCode);
+  const encodedTestCodeLiteral = JSON.stringify(encodedTestCode);
+  const harnessCode = `import base64
+import builtins
+import os
+import sys
+
+__pyq_user_code__ = base64.b64decode(${encodedUserCodeLiteral}).decode("utf-8")
+__pyq_test_code__ = base64.b64decode(${encodedTestCodeLiteral}).decode("utf-8")
+
+_original_sys_exit = sys.exit
+_original_os_exit = os._exit
+_original_exit = getattr(builtins, "exit", None)
+_original_quit = getattr(builtins, "quit", None)
+
+class UserCodeExitError(Exception):
+    pass
+
+def _blocked_exit(*_args, **_kwargs):
+    raise UserCodeExitError("exit() is not allowed in challenge submissions.")
+
+sys.exit = _blocked_exit
+os._exit = _blocked_exit
+builtins.exit = _blocked_exit
+builtins.quit = _blocked_exit
+
+__pyq_scope__ = {"__name__": "__main__"}
+
+try:
+    # Execute user code and tests in a shared isolated scope so definitions
+    # from the solution are available to tests without mutating module globals.
+    exec(__pyq_user_code__, __pyq_scope__, __pyq_scope__)
+except (UserCodeExitError, SystemExit):
+    raise AssertionError("Please remove exit/quit calls from your solution.")
+finally:
+    sys.exit = _original_sys_exit
+    os._exit = _original_os_exit
+    if _original_exit is not None:
+        builtins.exit = _original_exit
+    if _original_quit is not None:
+        builtins.quit = _original_quit
+
+exec(__pyq_test_code__, __pyq_scope__, __pyq_scope__)
+`;
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), RUNNER_TIMEOUT_MS);
 
@@ -130,11 +171,7 @@ export async function submitChallenge(
         "X-Runner-Token": runnerToken,
       },
       body: JSON.stringify({
-        code: `${code}
-
-${challenge.test_code}
-
-print("${passSentinel}")`,
+        code: harnessCode,
       }),
       cache: "no-store",
       signal: controller.signal,
@@ -175,10 +212,8 @@ print("${passSentinel}")`,
     clearTimeout(timeoutId);
   }
 
-  const rawStdout = result.stdout ?? "";
-  const sentinelSeen = rawStdout.split(/\r?\n/).some((line) => line.trim() === passSentinel);
-  const submissionStdout = removeSentinelLine(rawStdout, passSentinel);
-  const passed = Boolean(sentinelSeen && (result.exitCode ?? 1) === 0 && !result.timedOut);
+  const submissionStdout = result.stdout ?? "";
+  const passed = (result.exitCode ?? 1) === 0 && !result.timedOut;
 
   const { error: submissionError } = await supabase.from("submissions").insert({
     user_id: user.id,
