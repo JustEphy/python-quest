@@ -1,6 +1,6 @@
-import { CodeEditor } from "@/components/code-editor";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/server";
+import { PlaygroundClient } from "@/components/playground-client";
 
 export default async function PlaygroundPage({
   searchParams,
@@ -12,7 +12,7 @@ export default async function PlaygroundPage({
 
   const query = supabase
     .from("challenges")
-    .select("id, title, prompt, starter_code, expected_output, lessons:lesson_id(slug, title)")
+    .select("id, title, prompt, starter_code, expected_output, lessons:lesson_id(slug)")
     .order("created_at", { ascending: true });
 
   const challengeResult = params.lesson
@@ -29,18 +29,7 @@ export default async function PlaygroundPage({
           <CardContent className="p-6 text-sm text-muted-foreground">No challenges found.</CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>{challenge.title}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">{challenge.prompt}</p>
-            <CodeEditor initialCode={challenge.starter_code} name="code" />
-            <p className="text-xs text-muted-foreground">
-              Challenge execution and submission are wired in the next phase.
-            </p>
-          </CardContent>
-        </Card>
+        <PlaygroundClient challenge={challenge} />
       )}
     </main>
   );
